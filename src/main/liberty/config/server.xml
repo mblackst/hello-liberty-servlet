@@ -1,0 +1,8 @@
+<server description="Liberty Hello World Server">
+    <featureManager>
+        <feature>servlet-4.0</feature>
+    </featureManager>
+
+    <httpEndpoint httpPort="9080" httpsPort="9443" id="defaultHttpEndpoint"/>
+    <webApplication location="hello-liberty.war" contextRoot="/"/>
+</server>
