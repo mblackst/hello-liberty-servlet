@@ -1,0 +1,280 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: liberty-build-run-manual-001
+spec:
+  pipelineSpec:
+    workspaces:
+      - name: shared-data
+    params:
+      - name: IMAGE_NAME
+        type: string
+        default: "hello-liberty-servlet"
+      - name: IMAGE_TAG
+        type: string
+        default: "latest"
+    tasks:
+      # Task 1: Clone the Git repository
+      - name: step1-git-clone
+        workspaces:
+          - name: shared-data
+            workspace: shared-data
+        taskSpec:
+          workspaces:
+            - name: shared-data
+          steps:
+            - name: git-clone
+              image: alpine/git # Using alpine/git for cloning
+              script: |
+                #!/bin/sh
+                echo "Cloning into workspace $(workspaces.shared-data.path)..."
+                cd $(workspaces.shared-data.path)
+                # Clone repository into the shared workspace
+                git clone https://github.com/mblackst/hello-liberty-servlet.git
+                echo "Listing contents of cloned directory:"
+                ls -la hello-liberty-servlet
+
+      # Task 2: Build the application using Maven
+      - name: step2-maven-build
+        runAfter: [step1-git-clone] # Ensure cloning is done first
+        workspaces:
+          - name: shared-data
+            workspace: shared-data
+        taskSpec:
+          workspaces:
+            - name: shared-data
+          steps:
+            - name: maven-build
+              image: maven:3.8-openjdk-11 # Maven image with JDK 11
+              workingDir: $(workspaces.shared-data.path)/hello-liberty-servlet # Work inside the cloned repo
+              script: |
+                #!/bin/bash
+                echo "Running Maven build..."
+                mvn clean package # Standard Maven build command
+                echo "Listing contents of target directory:"
+                ls -la target/
+
+      # Task 3: Rename the WAR file for consistency
+      - name: rename-war
+        runAfter: [step2-maven-build] # Run after Maven build
+        workspaces:
+          - name: shared-data
+            workspace: shared-data
+        taskSpec:
+          workspaces:
+            - name: shared-data
+          steps:
+            - name: rename-war-file
+              image: ubuntu # Basic image with shell tools
+              workingDir: $(workspaces.shared-data.path)/hello-liberty-servlet
+              script: |
+                #!/bin/bash
+                echo "Attempting to rename WAR file to hello-liberty.war"
+                # Find the generated WAR file (might have version number)
+                WAR_ORIGINAL=$(find target -name '*.war' -type f | head -n1)
+                if [ -f "$WAR_ORIGINAL" ]; then
+                  # Rename it to a predictable name
+                  mv "$WAR_ORIGINAL" target/hello-liberty.war
+                  echo "✅ Renamed '$WAR_ORIGINAL' to 'target/hello-liberty.war'"
+                else
+                  echo "❌ No WAR file found in target/ directory to rename."
+                  exit 1 # Fail the task if WAR file is missing
+                fi
+
+      # Task 4: List the final WAR file to verify renaming
+      - name: step3-list-files
+        runAfter: [rename-war] # Run after renaming
+        workspaces:
+          - name: shared-data
+            workspace: shared-data
+        taskSpec:
+          workspaces:
+            - name: shared-data
+          steps:
+            - name: list-files
+              image: ubuntu
+              script: |
+                #!/bin/bash
+                echo "Listing contents of target directory after rename:"
+                # Specifically find the renamed WAR file
+                find $(workspaces.shared-data.path)/hello-liberty-servlet/target -name "hello-liberty.war"
+
+      # Task 5: Build container image using Buildah and push to internal registry
+      - name: step4-build-and-push
+        runAfter: [step3-list-files] # Run after WAR file is ready and verified
+        workspaces:
+          - name: shared-data
+            workspace: shared-data
+        params: # Pass pipeline params to the task
+          - name: IMAGE_NAME
+            value: $(params.IMAGE_NAME)
+          - name: IMAGE_TAG
+            value: $(params.IMAGE_TAG)
+        taskSpec:
+          workspaces:
+            - name: shared-data
+          params: # Define params the task accepts
+            - name: IMAGE_NAME
+              type: string
+            - name: IMAGE_TAG
+              type: string
+          steps:
+            # Step 5a: Check if Dockerfile exists
+            - name: check-dockerfile
+              image: ubuntu
+              script: |
+                #!/bin/bash
+                FILE="$(workspaces.shared-data.path)/hello-liberty-servlet/Dockerfile"
+                echo "Checking for Dockerfile at: $FILE"
+                [ -f "$FILE" ] && echo "✅ Dockerfile found." || { echo "❌ Dockerfile not found at expected location!"; exit 1; }
+
+            # Step 5b: Build and push using Buildah
+            - name: buildah-build-push
+              image: quay.io/buildah/stable:latest # Buildah image
+              workingDir: $(workspaces.shared-data.path)/hello-liberty-servlet # Context for build is repo root
+              securityContext:
+                privileged: true # Buildah requires privileged access
+              script: |
+                #!/bin/bash
+                set -e # Exit immediately if a command exits with a non-zero status.
+
+                # Construct the full image name using internal registry address and namespace
+                INTERNAL_REGISTRY="image-registry.openshift-image-registry.svc.cluster.local:5000"
+                NAMESPACE="$(context.taskRun.namespace)" # Get current namespace
+                IMG="${INTERNAL_REGISTRY}/${NAMESPACE}/$(params.IMAGE_NAME):$(params.IMAGE_TAG)"
+
+                echo "Building image: ${IMG}"
+                # Build the image using Dockerfile in the current directory (.)
+                # Using vfs storage driver as it's common in ephemeral environments
+                buildah bud --storage-driver=vfs -t "${IMG}" .
+
+                echo "Logging in to OpenShift internal registry: ${INTERNAL_REGISTRY}"
+                # Login using the service account token
+                buildah login --storage-driver=vfs -u openshift -p "$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" "${INTERNAL_REGISTRY}"
+
+                echo "Pushing image: ${IMG}"
+                # Push the image to the internal registry
+                buildah push --storage-driver=vfs "${IMG}" "docker://${IMG}"
+
+                echo "✅ Image build and push complete: ${IMG}"
+
+            # Step 5c: Create or verify ImageStream
+            - name: create-imagestream
+              image: quay.io/openshift/origin-cli:latest # OpenShift CLI image
+              script: |
+                #!/bin/bash
+                set -e
+                echo "Checking/Creating ImageStream: $(params.IMAGE_NAME)"
+                # Check if the ImageStream already exists
+                if ! oc get imagestream "$(params.IMAGE_NAME)" &>/dev/null; then
+                  echo "ImageStream $(params.IMAGE_NAME) not found. Creating..."
+                  # Create the ImageStream if it doesn't exist
+                  oc create imagestream "$(params.IMAGE_NAME)"
+                  echo "✅ ImageStream $(params.IMAGE_NAME) created."
+                else
+                  echo "✅ ImageStream $(params.IMAGE_NAME) already exists."
+                fi
+                # Optionally display the ImageStream definition
+                # oc get imagestream "$(params.IMAGE_NAME)" -o yaml
+
+      # Task 6: Deploy the application to OpenShift
+      - name: step5-deploy-app
+        runAfter: [step4-build-and-push] # Run after image is pushed
+        params: # Pass pipeline params to the task
+          - name: IMAGE_NAME
+            value: $(params.IMAGE_NAME)
+          - name: IMAGE_TAG
+            value: $(params.IMAGE_TAG)
+        taskSpec:
+          params: # Define params the task accepts
+            - name: IMAGE_NAME
+              type: string
+            - name: IMAGE_TAG
+              type: string
+          steps:
+            - name: deploy-to-cluster
+              image: quay.io/openshift/origin-cli:latest # OpenShift CLI image
+              script: |
+                #!/bin/bash
+                set -e # Exit on error
+
+                # --- Assign Tekton params to Shell variables ---
+                APP_NAME="$(params.IMAGE_NAME)"
+                APP_TAG="$(params.IMAGE_TAG)"
+                NAMESPACE="$(context.taskRun.namespace)" # Get current namespace
+                INTERNAL_REGISTRY="image-registry.openshift-image-registry.svc.cluster.local:5000"
+                # Construct full image path using internal registry reference
+                IMG="${INTERNAL_REGISTRY}/${NAMESPACE}/${APP_NAME}:${APP_TAG}"
+
+                echo "Deploying application '${APP_NAME}' using image: ${IMG}"
+
+                # --- Create or update Deployment ---
+                echo "Creating or updating Deployment: ${APP_NAME}"
+                # Use shell variable substitution within the heredoc
+                cat <<EOF | oc apply -f -
+                apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: ${APP_NAME} # Use shell variable for name
+                  labels:
+                    app: ${APP_NAME} # Use shell variable for label consistency
+                spec:
+                  replicas: 1
+                  selector:
+                    matchLabels:
+                      app: ${APP_NAME} # Use shell variable for selector
+                  template:
+                    metadata:
+                      labels:
+                        app: ${APP_NAME} # Use shell variable for pod label
+                    spec:
+                      containers:
+                        - name: app # Container name
+                          image: ${IMG} # Use shell variable for image path
+                          ports:
+                            - containerPort: 9080 # Port the application listens on inside the container
+                              protocol: TCP
+                EOF
+                echo "✅ Deployment apply command executed."
+
+                # --- Create or update Service ---
+                echo "Creating or updating Service: ${APP_NAME}"
+                # Use shell variable substitution within the heredoc
+                cat <<EOF | oc apply -f -
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: ${APP_NAME} # Use shell variable for name
+                  labels:
+                    app: ${APP_NAME} # Use shell variable for label consistency
+                spec:
+                  selector:
+                    app: ${APP_NAME} # Use shell variable to connect service to deployment pods
+                  ports:
+                    - name: http # Name for the port
+                      protocol: TCP
+                      port: 80 # External port the service listens on
+                      targetPort: 9080 # Port on the pod to forward traffic to (matches containerPort)
+                  type: ClusterIP # Default service type
+                EOF
+                echo "✅ Service apply command executed."
+
+                echo "🚀 Deployment and Service configuration applied for ${APP_NAME}."
+
+  # --- PipelineRun level parameter values ---
+  params:
+    - name: IMAGE_NAME
+      value: "hello-liberty-servlet" # Default value overridden at runtime if needed
+    - name: IMAGE_TAG
+      value: "latest" # Default value overridden at runtime if needed
+
+  # --- PipelineRun level workspace configuration ---
+  workspaces:
+    - name: shared-data # Name matches the workspace declared in pipelineSpec and used by tasks
+      volumeClaimTemplate: # Dynamically provision a PersistentVolumeClaim
+        spec:
+          accessModes:
+            - ReadWriteOnce # Can be mounted read-write by a single node
+          resources:
+            requests:
+              storage: 100Mi # Request 100 MiB of storage (Corrected)
