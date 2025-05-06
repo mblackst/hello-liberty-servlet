@@ -45,7 +45,7 @@ spec:
             - name: shared-data
           steps:
             - name: maven-build
-              image: maven:3.8-openjdk-11 # Maven image with JDK 11
+              image: mirror.gcr.io/library/maven:3.8-openjdk-11 # Maven image with JDK 11
               workingDir: $(workspaces.shared-data.path)/hello-liberty-servlet # Work inside the cloned repo
               script: |
                 #!/bin/bash
@@ -65,7 +65,7 @@ spec:
             - name: shared-data
           steps:
             - name: rename-war-file
-              image: ubuntu # Basic image with shell tools
+              image: fedora # Basic image with shell tools
               workingDir: $(workspaces.shared-data.path)/hello-liberty-servlet
               script: |
                 #!/bin/bash
@@ -92,7 +92,7 @@ spec:
             - name: shared-data
           steps:
             - name: list-files
-              image: ubuntu
+              image: fedora
               script: |
                 #!/bin/bash
                 echo "Listing contents of target directory after rename:"
@@ -121,7 +121,7 @@ spec:
           steps:
             # Step 5a: Check if Dockerfile exists
             - name: check-dockerfile
-              image: ubuntu
+              image: fedora
               script: |
                 #!/bin/bash
                 FILE="$(workspaces.shared-data.path)/hello-liberty-servlet/Dockerfile"
