@@ -4,5 +4,5 @@
     </featureManager>
 
     <httpEndpoint httpPort="9080" httpsPort="9443" id="defaultHttpEndpoint"/>
-    <webApplication location="hello-liberty.war" contextRoot="/"/>
+    <webApplication location="HelloWorldServlet.war" contextRoot="/"/>
 </server>
