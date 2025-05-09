@@ -74,8 +74,8 @@ spec:
                 WAR_ORIGINAL=$(find target -name '*.war' -type f | head -n1)
                 if [ -f "$WAR_ORIGINAL" ]; then
                   # Rename it to a predictable name
-                  mv "$WAR_ORIGINAL" target/hello-liberty.war
-                  echo "✅ Renamed '$WAR_ORIGINAL' to 'target/hello-liberty.war'"
+                  # mv "$WAR_ORIGINAL" target/hello-liberty.war
+                  echo "✅ Renamed '$WAR_ORIGINAL' to 'target/HelloWorldServlet.war'"
                 else
                   echo "❌ No WAR file found in target/ directory to rename."
                   exit 1 # Fail the task if WAR file is missing
